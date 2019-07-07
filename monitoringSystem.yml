@@ -1,0 +1,485 @@
+
+# Author: Connor Cai
+# Description: Template for monitoring system
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/Welcome.html
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: 'Updown Monitoring system for EC2 instances using alarms, cloudwatch events and lambda functions'
+
+# grouping the parameters
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label: 
+          default: Identifying EC2 Tag
+        Parameters: 
+          - EC2TagKey
+          - EC2TagValue
+      -
+        Label: 
+          default: S3
+        Parameters:
+          - BucketName
+      -
+        Label: 
+          default: Alarm Options
+        Parameters:
+          - AlarmPeriod
+          - EvaluationPeriods
+        
+Parameters: 
+
+  EC2TagKey:
+    Description: The key for the tag that identifies the EC2 instances that will be monitored
+    Type: String
+
+  EC2TagValue: 
+    Description: The value for the tag
+    Type: String
+
+  BucketName: 
+    Description: The name of the bucket where the template and the code is in
+    Type: String
+
+  RestartInstances:
+    Description: Restart instance if accidentally turned off
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'Yes'
+
+  RecoverStatusCheck:
+    Description: Recover an instance after a status check failure. Needs RestartInstances set to yes to work
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'Yes'
+
+  Email:
+    Description: Initial email to recieve notifications. Subscribe other endpoints to the monitoringNotification SNS
+    Type: String
+
+  CreateDashboard:
+    Description: Add a dashboard to monitor resources
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'Yes'
+
+  AlarmPeriod:
+    Description: The length of time, in seconds, over which the alarm must be failing 
+      (300 seconds = 5 minutes, 900 seconds = 15 minutes, 3600 seconds = 1 hour, 21600 seconds = 6 hours, 86400 seconds = 24 hours)
+    Type: Number
+    AllowedValues:
+      - 60
+      - 300
+      - 900
+      - 3600
+      - 21600
+      - 86400
+    Default: 60
+
+  EvaluationPeriods:
+    Description: The number of periods it takes to tigger an alarm
+    Type: Number
+    Default: 5
+
+Mappings: 
+  # so can change names of resources easily and get rid of my name
+  NamesMap:
+    Rules:
+      setUpRule: connorMonitorSetupRule
+      attachAlarmRule: connorAttachAlarmRule
+      stateChangeRule: connorStateChangeRule
+    Lambda:
+      attachAlarmLambda: attachAlarmConnor
+      stateChangeLambda: stateChangeConnor
+      alarmToSNSLambda: alarmToSNSConnor
+      monitorSetupLambda: monitorSetupConnor
+    IAM:
+      iamRole: connorLambdaRole
+      PolicyName: connor-lambda-policy
+    SNS:
+      monitoringNotification: connorMonitorNotification
+      monitoringNotificationDisplay: conMonitor 
+      monitoringMiddleman: connorMonitorMiddleman
+      monitoringMiddlemanDisplay: conMiddle
+    Dashboard:
+      dashboard: connorMonitorDashboard   
+
+Conditions: 
+  CreateDash: !Equals [!Ref CreateDashboard, 'Yes']
+Resources: 
+
+  # IAM Role
+  iamRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      # If use same template name in different regions it causes an error 
+      RoleName: !Join
+      - '_'
+      - -  !Ref AWS::Region
+        -  !FindInMap [NamesMap, IAM, iamRole]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - lambda.amazonaws.com
+            Action: 
+              - sts:AssumeRole
+      Policies:
+      -
+        PolicyName: !FindInMap [NamesMap, IAM, PolicyName]
+        PolicyDocument: 
+          Version: '2012-10-17'
+          Statement: 
+            -
+              Effect: Allow
+              Action: 
+                - cloudwatch:PutDashboard
+                - cloudwatch:GetDashboard
+                - cloudwatch:PutMetricData
+                - ec2:DescribeInstances
+                - cloudwatch:DeleteAlarms
+                - sns:DeleteTopic
+                - ec2:MonitorInstances
+                - logs:*
+                - cloudwatch:DeleteDashboards
+                - sns:Publish
+                - ec2:StartInstances
+                - cloudwatch:DisableAlarmActions
+                - cloudwatch:ListDashboards
+                - lambda:DeleteFunction
+                - cloudwatch:SetAlarmState
+                - ec2:DescribeInstanceStatus
+                - ec2:RebootInstances
+                - cloudwatch:GetDashboard
+                - ec2:DescribeTags
+                - ec2:CreateTags
+                - ec2:StopInstances
+                - cloudwatch:PutMetricAlarm
+                - iam:CreateServiceLinkedRole
+                - cloudwatch:EnableAlarmActions
+                - cloudwatch:DescribeAlarms
+                - iam:ListAccountAliases
+                - events:DeleteRule
+                - events:RemoveTargets
+                - events:DisableRule
+              Resource: "*"
+
+  #cloudwatch rules and events
+  attachAlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Triggers a lambda function to attach an alarm to the EC2 instance
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - running    
+      Name: !FindInMap [NamesMap, Rules, attachAlarmRule]
+      State: ENABLED
+      Targets: 
+        -
+          Arn: !GetAtt attachAlarmLambda.Arn
+          Id: attachAlarmLambda
+  
+  stateChangeRule: 
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Triggers a lambda function if instance is accidentaly stopped
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - stopped
+            - terminated
+      Name: !FindInMap [NamesMap, Rules, stateChangeRule]
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt stateChangeLambda.Arn
+          Id: stateChangeLambda
+
+  setupRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Triggers lambda to set up alarms and tags on CFN creation
+      ScheduleExpression: rate(1 minute)
+      Name: !FindInMap [NamesMap, Rules, setUpRule]
+      State: ENABLED
+      Targets:
+        -
+          Arn: !GetAtt monitorSetupLambda.Arn
+          Id: monitorSetupLambda
+    DependsOn: monitorSetupLambda
+        
+  # events need permissions to invoke lambda
+  attachAlarmPermissionToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt attachAlarmLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt attachAlarmRule.Arn
+  
+  stateChangePermissionToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt stateChangeLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt stateChangeRule.Arn
+
+  setUpPermissionToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt monitorSetupLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt setupRule.Arn
+    DependsOn: monitorSetupLambda
+
+  #lambdas
+  attachAlarmLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: 
+        S3Bucket: !Ref BucketName
+        S3Key: attachAlarm.zip
+      Environment:
+        Variables:
+          snsTopic: !Ref monitoringMiddleman
+          tagKey: !Ref EC2TagKey
+          tagValue: !Ref EC2TagValue
+          recoverInstance: !Ref RecoverStatusCheck
+          createDashboard: !Ref CreateDashboard
+          dashboardName: !FindInMap [NamesMap, Dashboard, dashboard]
+          alarmPeriod: !Ref AlarmPeriod
+          evaluationPeriods: !Ref EvaluationPeriods
+      Description: Attaches an alarm to an EC2 instance once it changes state to running
+      FunctionName: !FindInMap [NamesMap, Lambda, attachAlarmLambda]
+      Handler: attachAlarm.handler
+      Role: !GetAtt iamRole.Arn
+      Timeout: 5
+      Runtime: python2.7
+  
+  stateChangeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: stateChange.zip
+      Environment: 
+        Variables:
+          snsTopic: !Ref monitoringNotification
+          tagKey: !Ref EC2TagKey
+          tagValue: !Ref EC2TagValue
+          restartInstance: !Ref RestartInstances
+      Description: Sends a message to an SNS topic if an instance is accidentally stopped or shut down
+      FunctionName: !FindInMap [NamesMap, Lambda, stateChangeLambda]
+      Handler: stateChange.handler
+      Role: !GetAtt iamRole.Arn
+      Runtime: python2.7
+
+  alarmToSNSLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: alarmToSNS.zip
+      Environment: 
+          Variables:
+            snsTopic: !Ref monitoringNotification
+            recoverInstance: !Ref RecoverStatusCheck
+      Description: Takes input from SNS Topic, formats it then publishes to another SNS Topic
+      FunctionName: !FindInMap [NamesMap, Lambda, alarmToSNSLambda]
+      Handler: alarmToSNS.handler
+      Role: !GetAtt iamRole.Arn
+      Runtime: python3.6 # makes for easier event processing
+
+  monitorSetupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: monitorSetup.zip
+      Environment: 
+        Variables:
+          ruleName: !FindInMap [NamesMap, Rules, setUpRule]
+          lambdaName: !FindInMap [NamesMap, Lambda, monitorSetupLambda]
+          snsArn: !Ref monitoringMiddleman
+          recoverInstance: !Ref RecoverStatusCheck
+          createDashboard: !Ref CreateDashboard
+          dashboardName: !FindInMap [NamesMap, Dashboard, dashboard]
+          alarmPeriod: !Ref AlarmPeriod
+          evaluationPeriods: !Ref EvaluationPeriods
+          tagKey: !Ref EC2TagKey
+          tagValue: !Ref EC2TagValue
+          instanceRegion: !Ref AWS::Region
+      Description: Add alarm and tags to marked instances
+      FunctionName: !FindInMap [NamesMap, Lambda, monitorSetupLambda]
+      Handler: monitorSetup.handler
+      Role: !GetAtt iamRole.Arn
+      Timeout: 5
+      Runtime: python2.7
+
+  # SNS Topics
+  monitoringNotification:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !FindInMap [NamesMap, SNS, monitoringNotificationDisplay]
+      Subscription: 
+        -
+          Endpoint: !Ref Email  # don't forget to confirm subscription
+          Protocol: email
+      TopicName: !FindInMap [NamesMap, SNS, monitoringNotification]
+
+  monitoringMiddleman:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !FindInMap [NamesMap, SNS, monitoringMiddlemanDisplay]
+      Subscription:
+        -
+          Endpoint: !GetAtt alarmToSNSLambda.Arn
+          Protocol: lambda
+      TopicName: !FindInMap [NamesMap, SNS, monitoringMiddleman]
+      
+  # sns permission to invoke lambda
+  alarmToSNSPermissionToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt alarmToSNSLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref monitoringMiddleman
+
+  # cloudwatch dashboard
+  dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: CreateDash 
+    Properties:
+      DashboardName: !FindInMap [NamesMap, Dashboard, dashboard]
+      DashboardBody: !Sub
+      - '{
+        "widgets":[
+          {
+            "type":"metric",
+            "properties":{
+              "metrics":[
+                [
+                  "AWS/Lambda",
+                  "Invocations",
+                  "FunctionName",
+                  "${attachAlarm}"
+                ]
+              ],
+            "region":"${AWS::Region}",
+            "title":"${attachAlarm}",
+            "stat": "Maximum",
+            "view": "timeSeries",
+            "stacked": true
+            }
+          },
+          {
+            "type":"metric",
+            "properties":{
+              "metrics":[
+                [
+                  "AWS/Lambda",
+                  "Invocations",
+                  "FunctionName",
+                  "${stateChange}"
+                ]
+              ],
+            "region":"${AWS::Region}",
+            "title":"${stateChange}",
+            "stat": "Maximum",
+            "view": "timeSeries",
+            "stacked": true
+            }
+          },
+          {
+            "type":"metric",
+            "properties":{
+              "metrics":[
+                [
+                  "AWS/Lambda",
+                  "Invocations",
+                  "FunctionName",
+                  "${alarmToSNS}"
+                ]
+              ],
+            "region":"${AWS::Region}",
+            "title":"${alarmToSNS}",
+            "stat": "Maximum",
+            "view": "timeSeries",
+            "stacked": true
+            }
+          },
+          {
+            "type":"metric",
+            "properties":{
+              "metrics":[
+                [
+                  "AWS/Lambda",
+                  "Invocations",
+                  "FunctionName",
+                  "${monitorSetup}"
+                ]
+              ],
+            "region":"${AWS::Region}",
+            "title":"${monitorSetup}  ",
+            "stat": "Maximum",
+            "view": "timeSeries",
+            "stacked": true
+            }
+          },
+          {
+            "type":"metric",
+            "properties":{
+              "metrics":[
+                [
+                  "AWS/SNS",
+                  "NumberOfMessagesPublished",
+                  "TopicName",
+                  "${monitoringNotification}"
+                ],
+                [
+                  "AWS/SNS",
+                  "NumberOfMessagesPublished",
+                  "TopicName",
+                  "${monitoringMiddleman}"
+                ]
+              ],
+              "region":"${AWS::Region}",
+              "title":"SNS Publishes",
+              "stat": "Maximum",
+              "view": "timeSeries",
+              "stacked": true
+            }
+          }
+        ]
+        }'
+      - { 
+        attachAlarm: !FindInMap [NamesMap, Lambda, attachAlarmLambda],
+        stateChange: !FindInMap [NamesMap, Lambda, stateChangeLambda],
+        alarmToSNS: !FindInMap [NamesMap, Lambda, alarmToSNSLambda],
+        monitorSetup: !FindInMap [NamesMap, Lambda, monitorSetupLambda],
+        monitoringNotification: !FindInMap [NamesMap, SNS, monitoringNotification],
+        monitoringMiddleman: !FindInMap [NamesMap, SNS, monitoringMiddleman],
+       }  
