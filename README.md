@@ -30,3 +30,4 @@ HOW TO SET UP (Also in monitordocs.pdf file)
   - It takes a little bit for the alarms to be attached
   - To change resource names, you have to edit the maps in the YAML template
   - Remember to confirm email
+  - View the monitoringdocs.pdf file for how the system works 
