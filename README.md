@@ -1,7 +1,7 @@
 # Monitoring-System
 System to monitor EC2 instances in AWS
 
-HOW TO SET UP (Also in monitordocs.pdf file)
+HOW TO SET UP (Also in Documentation.pdf file)
 -
   - Add a tag to all EC2 Instances to identify which ones will be monitored
 
@@ -30,4 +30,4 @@ HOW TO SET UP (Also in monitordocs.pdf file)
   - It takes a little bit for the alarms to be attached
   - To change resource names, you have to edit the maps in the YAML template
   - Remember to confirm email
-  - View the monitoringdocs.pdf file for how the system works 
+  - View the Documentation.pdf file for how the system works 
